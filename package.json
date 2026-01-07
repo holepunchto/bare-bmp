@@ -1,0 +1,33 @@
+{
+  "name": "bare-bmp",
+  "version": "0.1.0",
+  "description": "Native BMP codec for Bare",
+  "main": "index.js",
+  "addon": true,
+  "exports": {
+    "./package": "./package.json",
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "binding.c",
+    "binding.js",
+    "CMakeLists.txt",
+    "prebuilds"
+  ],
+  "scripts": {
+    "test": "prettier . --check && bare test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holepunchto/bare-bmp.git"
+  },
+  "author": "Holepunch Inc",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "brittle": "^3.4.0",
+    "cmake-bare": "^1.1.2",
+    "prettier": "^3.3.3",
+    "prettier-config-holepunch": "^2.0.0"
+  }
+}
