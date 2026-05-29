@@ -74,3 +74,43 @@ test('encode RGBA to BMP', function (t) {
 test('encodeAnimated throws', function (t) {
   t.exception(() => bmp.encodeAnimated())
 })
+
+function makeHeader({ width, height, bpp = 32 }) {
+  const header = Buffer.alloc(54)
+  header.write('BM', 0)
+  header.writeUInt32LE(54, 10) // data offset
+  header.writeUInt32LE(40, 14) // dib header size
+  header.writeInt32LE(width, 18)
+  header.writeInt32LE(height, 22)
+  header.writeUInt16LE(1, 26) // planes
+  header.writeUInt16LE(bpp, 28)
+  return header
+}
+
+test('decode rejects width that overflows allocation', function (t) {
+  // width * height * 4 wraps int32 to 4, pre-fix this caused a heap OOB write
+  t.exception(() => bmp.decode(makeHeader({ width: 0x40000001, height: 1 })))
+})
+
+test('decode rejects INT32_MIN height', function (t) {
+  // -INT32_MIN is undefined behavior; must be rejected
+  t.exception(() => bmp.decode(makeHeader({ width: 1, height: -2147483648 })))
+})
+
+test('decode rejects non-positive width', function (t) {
+  t.exception(() => bmp.decode(makeHeader({ width: 0, height: 1 })))
+  t.exception(() => bmp.decode(makeHeader({ width: -1, height: 1 })))
+})
+
+test('decode rejects zero height', function (t) {
+  t.exception(() => bmp.decode(makeHeader({ width: 1, height: 0 })))
+})
+
+test('encode rejects non-positive dimensions', function (t) {
+  t.exception(() =>
+    bmp.encode({ width: 0, height: 1, data: Buffer.alloc(4) })
+  )
+  t.exception(() =>
+    bmp.encode({ width: 1, height: -1, data: Buffer.alloc(4) })
+  )
+})

@@ -16,17 +16,17 @@ typedef struct __attribute__((packed)) {
 
 // DIB header - BITMAPINFOHEADER (40 bytes)
 typedef struct __attribute__((packed)) {
-  uint32_t header_size;     // Header size (40)
-  int32_t width;            // Image width
-  int32_t height;           // Image height (negative = top-down)
-  uint16_t planes;          // Color planes (always 1)
-  uint16_t bpp;             // Bits per pixel (24 or 32)
-  uint32_t compression;     // Compression (0 = none)
-  uint32_t image_size;      // Image size (can be 0 for uncompressed)
-  int32_t x_pixels_per_m;   // Horizontal resolution
-  int32_t y_pixels_per_m;   // Vertical resolution
-  uint32_t colors_used;     // Colors in palette (0 = all)
-  uint32_t colors_important;// Important colors (0 = all)
+  uint32_t header_size;      // Header size (40)
+  int32_t width;             // Image width
+  int32_t height;            // Image height (negative = top-down)
+  uint16_t planes;           // Color planes (always 1)
+  uint16_t bpp;              // Bits per pixel (24 or 32)
+  uint32_t compression;      // Compression (0 = none)
+  uint32_t image_size;       // Image size (can be 0 for uncompressed)
+  int32_t x_pixels_per_m;    // Horizontal resolution
+  int32_t y_pixels_per_m;    // Vertical resolution
+  uint32_t colors_used;      // Colors in palette (0 = all)
+  uint32_t colors_important; // Important colors (0 = all)
 } bmp_dib_header_t;
 
 static void
@@ -96,23 +96,41 @@ bare_bmp_decode(js_env_t *env, js_callback_info_t *info) {
 
   int32_t width = dib_header->width;
   int32_t height = dib_header->height;
-  int32_t abs_height = height < 0 ? -height : height;
+
+  // Validate dimensions: width must be positive, height must be non-zero,
+  // and height == INT32_MIN would make negation undefined behavior.
+  if (width <= 0 || height == 0 || height == INT32_MIN) {
+    err = js_throw_error(env, NULL, "Invalid BMP: invalid dimensions");
+    assert(err == 0);
+    return NULL;
+  }
+
+  uint32_t abs_height = (uint32_t) (height < 0 ? -height : height);
   bool top_down = height < 0;
   uint16_t bpp = dib_header->bpp;
   uint32_t bytes_per_pixel = bpp / 8;
 
-  // Calculate row size with 4-byte padding
-  uint32_t row_size = ((width * bytes_per_pixel + 3) / 4) * 4;
+  // Calculate row size with 4-byte padding in 64-bit to avoid overflow.
+  uint64_t row_size = (((uint64_t) width * bytes_per_pixel) + 3) / 4 * 4;
+  uint64_t pixel_data_size = row_size * abs_height;
 
-  // Validate data offset and size
-  if (file_header->data_offset + (row_size * abs_height) > bmp_len) {
+  // Validate data offset and size without overflow.
+  if (file_header->data_offset > bmp_len || pixel_data_size > (uint64_t) (bmp_len - file_header->data_offset)) {
     err = js_throw_error(env, NULL, "Invalid BMP: pixel data exceeds file size");
     assert(err == 0);
     return NULL;
   }
 
+  // Compute RGBA output size in 64-bit and ensure it fits in size_t.
+  uint64_t rgba_size = (uint64_t) width * abs_height * 4;
+  if (rgba_size > SIZE_MAX) {
+    err = js_throw_error(env, NULL, "Invalid BMP: image too large");
+    assert(err == 0);
+    return NULL;
+  }
+
   // Allocate RGBA output buffer
-  uint8_t *rgba_data = malloc(width * abs_height * 4);
+  uint8_t *rgba_data = malloc((size_t) rgba_size);
   if (!rgba_data) {
     err = js_throw_error(env, NULL, "Memory allocation failed");
     assert(err == 0);
@@ -122,17 +140,17 @@ bare_bmp_decode(js_env_t *env, js_callback_info_t *info) {
   uint8_t *pixel_data = bmp_data + file_header->data_offset;
 
   // Convert BGR(A) to RGBA
-  for (int32_t y = 0; y < abs_height; y++) {
+  for (uint32_t y = 0; y < abs_height; y++) {
     // BMP stores pixels bottom-up by default (unless height is negative)
-    int32_t src_row = top_down ? y : (abs_height - 1 - y);
-    uint8_t *src = pixel_data + src_row * row_size;
-    uint8_t *dst = rgba_data + y * width * 4;
+    uint32_t src_row = top_down ? y : (abs_height - 1 - y);
+    uint8_t *src = pixel_data + (size_t) src_row * (size_t) row_size;
+    uint8_t *dst = rgba_data + (size_t) y * (size_t) width * 4;
 
     for (int32_t x = 0; x < width; x++) {
       // BGR(A) -> RGBA conversion
-      dst[0] = src[2]; // R
-      dst[1] = src[1]; // G
-      dst[2] = src[0]; // B
+      dst[0] = src[2];                      // R
+      dst[1] = src[1];                      // G
+      dst[2] = src[0];                      // B
       dst[3] = (bpp == 32) ? src[3] : 0xFF; // A
 
       src += bytes_per_pixel;
@@ -161,7 +179,7 @@ bare_bmp_decode(js_env_t *env, js_callback_info_t *info) {
 
   // Set data property (external ArrayBuffer with finalizer)
   js_value_t *buffer;
-  err = js_create_external_arraybuffer(env, rgba_data, width * abs_height * 4, bare_bmp__on_finalize, NULL, &buffer);
+  err = js_create_external_arraybuffer(env, rgba_data, (size_t) rgba_size, bare_bmp__on_finalize, NULL, &buffer);
   assert(err == 0);
   err = js_set_named_property(env, result, "data", buffer);
   assert(err == 0);
@@ -212,33 +230,48 @@ bare_bmp_encode(js_env_t *env, js_callback_info_t *info) {
   err = js_get_typedarray_info(env, data_val, NULL, (void **) &rgba_data, &rgba_len, NULL, NULL);
   assert(err == 0);
 
-  // Validate input
-  if (rgba_len < (size_t)(width * height * 4)) {
+  // Validate dimensions
+  if (width <= 0 || height <= 0) {
+    err = js_throw_error(env, NULL, "Invalid RGBA: invalid dimensions");
+    assert(err == 0);
+    return NULL;
+  }
+
+  // Validate input size without overflow
+  uint64_t rgba_required = (uint64_t) width * (uint64_t) height * 4;
+  if ((uint64_t) rgba_len < rgba_required) {
     err = js_throw_error(env, NULL, "Invalid RGBA: data buffer too small");
     assert(err == 0);
     return NULL;
   }
 
-  // Calculate row size with 4-byte padding (24-bit = 3 bytes per pixel)
+  // Calculate row size with 4-byte padding (24-bit = 3 bytes per pixel) in 64-bit
   uint32_t bytes_per_pixel = 3;
-  uint32_t row_size = ((width * bytes_per_pixel + 3) / 4) * 4;
-  uint32_t pixel_data_size = row_size * height;
-  uint32_t file_size = sizeof(bmp_file_header_t) + sizeof(bmp_dib_header_t) + pixel_data_size;
+  uint64_t row_size = (((uint64_t) width * bytes_per_pixel) + 3) / 4 * 4;
+  uint64_t pixel_data_size = row_size * (uint64_t) height;
+  uint64_t file_size = (uint64_t) sizeof(bmp_file_header_t) + sizeof(bmp_dib_header_t) + pixel_data_size;
+
+  // BMP file_size header field is uint32_t; cap accordingly.
+  if (file_size > UINT32_MAX) {
+    err = js_throw_error(env, NULL, "Invalid RGBA: image too large");
+    assert(err == 0);
+    return NULL;
+  }
 
   // Allocate output buffer
-  uint8_t *bmp_data = malloc(file_size);
+  uint8_t *bmp_data = malloc((size_t) file_size);
   if (!bmp_data) {
     err = js_throw_error(env, NULL, "Memory allocation failed");
     assert(err == 0);
     return NULL;
   }
 
-  memset(bmp_data, 0, file_size);
+  memset(bmp_data, 0, (size_t) file_size);
 
   // Create file header
   bmp_file_header_t *file_header = (bmp_file_header_t *) bmp_data;
   file_header->magic = 0x4D42; // 'BM'
-  file_header->file_size = file_size;
+  file_header->file_size = (uint32_t) file_size;
   file_header->reserved1 = 0;
   file_header->reserved2 = 0;
   file_header->data_offset = sizeof(bmp_file_header_t) + sizeof(bmp_dib_header_t);
@@ -246,12 +279,12 @@ bare_bmp_encode(js_env_t *env, js_callback_info_t *info) {
   // Create DIB header
   bmp_dib_header_t *dib_header = (bmp_dib_header_t *) (bmp_data + sizeof(bmp_file_header_t));
   dib_header->header_size = 40;
-  dib_header->width = width;
-  dib_header->height = height; // Positive = bottom-up
+  dib_header->width = (int32_t) width;
+  dib_header->height = (int32_t) height; // Positive = bottom-up
   dib_header->planes = 1;
   dib_header->bpp = 24;
   dib_header->compression = 0; // No compression
-  dib_header->image_size = pixel_data_size;
+  dib_header->image_size = (uint32_t) pixel_data_size;
   dib_header->x_pixels_per_m = 2835; // 72 DPI
   dib_header->y_pixels_per_m = 2835; // 72 DPI
   dib_header->colors_used = 0;
@@ -260,13 +293,13 @@ bare_bmp_encode(js_env_t *env, js_callback_info_t *info) {
   // Convert RGBA to BGR and write bottom-up
   uint8_t *pixel_data = bmp_data + file_header->data_offset;
 
-  for (int32_t y = 0; y < height; y++) {
+  for (int64_t y = 0; y < height; y++) {
     // Write bottom-up (BMP standard)
-    int32_t dst_row = height - 1 - y;
-    uint8_t *src = rgba_data + y * width * 4;
-    uint8_t *dst = pixel_data + dst_row * row_size;
+    int64_t dst_row = height - 1 - y;
+    uint8_t *src = rgba_data + (size_t) y * (size_t) width * 4;
+    uint8_t *dst = pixel_data + (size_t) dst_row * (size_t) row_size;
 
-    for (int32_t x = 0; x < width; x++) {
+    for (int64_t x = 0; x < width; x++) {
       // RGBA -> BGR conversion (skip alpha)
       dst[0] = src[2]; // B
       dst[1] = src[1]; // G
@@ -280,7 +313,7 @@ bare_bmp_encode(js_env_t *env, js_callback_info_t *info) {
 
   // Create external ArrayBuffer with finalizer
   js_value_t *result;
-  err = js_create_external_arraybuffer(env, bmp_data, file_size, bare_bmp__on_finalize, NULL, &result);
+  err = js_create_external_arraybuffer(env, bmp_data, (size_t) file_size, bare_bmp__on_finalize, NULL, &result);
   assert(err == 0);
 
   return result;
