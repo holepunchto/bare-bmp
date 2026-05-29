@@ -107,10 +107,6 @@ test('decode rejects zero height', function (t) {
 })
 
 test('encode rejects non-positive dimensions', function (t) {
-  t.exception(() =>
-    bmp.encode({ width: 0, height: 1, data: Buffer.alloc(4) })
-  )
-  t.exception(() =>
-    bmp.encode({ width: 1, height: -1, data: Buffer.alloc(4) })
-  )
+  t.exception(() => bmp.encode({ width: 0, height: 1, data: Buffer.alloc(4) }))
+  t.exception(() => bmp.encode({ width: 1, height: -1, data: Buffer.alloc(4) }))
 })
